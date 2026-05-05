@@ -1,0 +1,106 @@
+name: Build Windows Static Library (SSL)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ssl ${{ matrix.visual_studio.name }} ${{ matrix.arch.name }} ${{ matrix.configuration }} ${{ matrix.runtime.name }}
+    runs-on: ${{ matrix.visual_studio.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        visual_studio:
+          - name: vs2022
+            runner: windows-2022
+            generator: Visual Studio 17 2022
+          - name: vs2026
+            runner: windows-2025-vs2026
+            generator: Visual Studio 18 2026
+        arch:
+          - name: x86
+            cmake_arch: Win32
+            vcpkg_triplet_md: x86-windows
+            vcpkg_triplet_mt: x86-windows-static
+          - name: x64
+            cmake_arch: x64
+            vcpkg_triplet_md: x64-windows
+            vcpkg_triplet_mt: x64-windows-static
+        configuration: [Debug, Release]
+        runtime:
+          - name: MD
+            static_runtime: OFF
+            openssl_static: OFF
+          - name: MT
+            static_runtime: ON
+            openssl_static: ON
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select vcpkg triplet
+        shell: pwsh
+        run: |
+          if ("${{ matrix.runtime.name }}" -eq "MT") {
+            "VCPKG_TARGET_TRIPLET=${{ matrix.arch.vcpkg_triplet_mt }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            "VCPKG_TARGET_TRIPLET=${{ matrix.arch.vcpkg_triplet_md }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+
+      - name: Install OpenSSL
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) {
+            $vcpkgRoot = "C:\vcpkg"
+          }
+
+          & "$vcpkgRoot\vcpkg.exe" install "openssl:$env:VCPKG_TARGET_TRIPLET" --clean-after-build
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake
+          -S .
+          -B build
+          -G "${{ matrix.visual_studio.generator }}"
+          -A "${{ matrix.arch.cmake_arch }}"
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET="$env:VCPKG_TARGET_TRIPLET"
+          -DHAVE_SSL=ON
+          -DOPENSSL_USE_STATIC_LIBS=${{ matrix.runtime.openssl_static }}
+          -DQUICKFIX_EXAMPLES=OFF
+          -DQUICKFIX_TESTS=OFF
+          -DQUICKFIX_SHARED_LIBS=OFF
+          -DSTATIC_RUNTIME=${{ matrix.runtime.static_runtime }}
+          -DQUICKFIX_LIB_OUTPUT_DIR="${{ github.workspace }}\build-output\lib"
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.configuration }} --target quickfix --parallel
+
+      - name: Install
+        run: cmake --install build --config ${{ matrix.configuration }} --prefix package
+
+      - name: Write build metadata
+        shell: pwsh
+        run: |
+          @(
+            "quickfix static library"
+            "ssl=ON"
+            "os=windows"
+            "toolset=${{ matrix.visual_studio.name }}"
+            "cmake_generator=${{ matrix.visual_studio.generator }}"
+            "arch=${{ matrix.arch.name }}"
+            "configuration=${{ matrix.configuration }}"
+            "runtime=${{ matrix.runtime.name }}"
+            "vcpkg_triplet=$env:VCPKG_TARGET_TRIPLET"
+          ) | Set-Content -Path package\build-info.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickfix-windows-ssl-${{ matrix.visual_studio.name }}-${{ matrix.arch.name }}-${{ matrix.configuration }}-${{ matrix.runtime.name }}
+          path: package
+          if-no-files-found: error
